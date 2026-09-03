@@ -1,0 +1,638 @@
+#!/usr/bin/env python3
+
+import os
+import re
+import sys
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+
+# ============================================================
+# Cores
+# ============================================================
+
+RESET = "\033[0m"
+BOLD = "\033[1m"
+
+CYAN = "\033[96m"
+BLUE = "\033[94m"
+GREEN = "\033[92m"
+YELLOW = "\033[93m"
+RED = "\033[91m"
+MAGENTA = "\033[95m"
+GRAY = "\033[90m"
+
+# ============================================================
+# Configuração da interface
+# ============================================================
+
+ANIMATION_DELAY = 0.025
+STEP_DELAY = 0.20
+
+# ============================================================
+# Estrutura dos dados
+# ============================================================
+
+@dataclass
+class Depot:
+    depot_id: int
+    has_key: bool = False
+
+
+@dataclass
+class Dump:
+    title: str = "Unknown"
+    apps: set[int] = field(default_factory=set)
+    depots: dict[int, Depot] = field(default_factory=dict)
+    titles: dict[int, str] = field(default_factory=dict)
+
+# ============================================================
+# Terminal
+# ============================================================
+
+def clear_terminal():
+    os.system("clear" if os.name != "nt" else "cls")
+
+
+def sleep_animation(seconds=STEP_DELAY):
+    time.sleep(seconds)
+
+# ============================================================
+# Banner
+# ============================================================
+
+def banner():
+    print()
+    print(f"{CYAN}{BOLD}╔══════════════════════════════════════════════╗{RESET}")
+    print(f"{CYAN}{BOLD}║        Steam Depot Organizer                 ║{RESET}")
+    print(f"{CYAN}{BOLD}╚══════════════════════════════════════════════╝{RESET}")
+    print()
+
+# ============================================================
+# Separadores
+# ============================================================
+
+def section(number, title):
+    print()
+    print(
+        f"{CYAN}{BOLD}"
+        f"[ {number}/3 ] {title.upper()}"
+        f"{RESET}"
+    )
+    print(
+        f"{GRAY}"
+        "────────────────────────────────────────────────"
+        f"{RESET}"
+    )
+    print()
+
+# ============================================================
+# Spinner
+# ============================================================
+
+def spinner(text, duration=0.6):
+
+    frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+
+    end_time = time.time() + duration
+    index = 0
+
+    while time.time() < end_time:
+        frame = frames[index % len(frames)]
+
+        print(
+            f"\r{CYAN}{frame}{RESET} {text}",
+            end="",
+            flush=True,
+        )
+
+        time.sleep(0.06)
+        index += 1
+
+    print(
+        f"\r{GREEN}✓{RESET} {text}"
+    )
+
+# ============================================================
+# Barra de progresso
+# ============================================================
+
+def progress_bar(text, steps=30, width=40):
+
+    for current in range(steps + 1):
+
+        percent = int((current / steps) * 100)
+
+        filled = int(width * current / steps)
+        empty = width - filled
+
+        bar = "█" * filled + "░" * empty
+
+        print(
+            f"\r{CYAN}{text}{RESET} "
+            f"[{GREEN}{bar}{RESET}] "
+            f"{percent:3d}%",
+            end="",
+            flush=True,
+        )
+
+        time.sleep(ANIMATION_DELAY)
+
+    print()
+
+# ============================================================
+# Parser
+# ============================================================
+
+def parse_lua(path: Path):
+
+    # --------------------------------------------------------
+    # Leitura
+    # --------------------------------------------------------
+
+    try:
+        content = path.read_text(
+            encoding="utf-8",
+            errors="replace",
+        )
+
+    except OSError as e:
+        print(f"{RED}Erro ao ler arquivo:{RESET} {e}")
+        return None
+
+    original_lines = content.splitlines()
+
+    # --------------------------------------------------------
+    # Título
+    # --------------------------------------------------------
+
+    title = "Unknown"
+
+    if len(original_lines) >= 2:
+        title = (
+            original_lines[1]
+            .removeprefix("--")
+            .strip()
+        )
+
+    dump = Dump(title=title)
+
+    active_lines = []
+
+    for line in original_lines:
+
+        stripped = line.lstrip()
+
+        if stripped.startswith("--"):
+            continue
+
+        active_lines.append(line)
+
+    active_content = "\n".join(active_lines)
+
+    addappid_pattern = re.compile(
+        r'^\s*addappid\s*\(\s*(\d+)(.*?)\)',
+        re.MULTILINE,
+    )
+
+    matches = list(
+        addappid_pattern.finditer(active_content)
+    )
+
+    # --------------------------------------------------------
+    # Processamento
+    # --------------------------------------------------------
+
+    for index, match in enumerate(matches):
+
+        appid = int(match.group(1))
+        arguments = match.group(2)
+
+        if index == 0:
+            dump.apps.add(appid)
+
+        if re.search(
+            r'^\s*,\s*1\s*,',
+            arguments,
+        ):
+            text_match = re.search(
+                r'"([^"]*)"',
+                arguments,
+            )
+
+            title = (
+                text_match.group(1)
+                if text_match
+                else "Unknown"
+            )
+
+            dump.depots[appid] = Depot(
+                depot_id=appid,
+                has_key=True,
+            )
+
+            dump.titles[appid] = title
+
+        else:
+            if index > 0:
+                dump.apps.add(appid)
+
+    return dump
+
+# ============================================================
+# Extração
+# ============================================================
+
+def generate_yaml(dump: Dump):
+    lines = []
+
+    # --------------------------------------------------------
+    # AdditionalApps
+    # --------------------------------------------------------
+
+    lines.append("AdditionalApps:")
+
+    if dump.apps:
+
+        for appid in sorted(dump.apps):
+            lines.append(f"  - {appid}")
+
+    else:
+        lines.append("  []")
+
+    # --------------------------------------------------------
+    # AdditionalDepots
+    # --------------------------------------------------------
+
+    lines.append("")
+    lines.append("AdditionalDepots:")
+
+    if dump.depots:
+
+        for depot_id in sorted(dump.depots):
+            lines.append(f"  - {depot_id}")
+
+    else:
+        lines.append("  []")
+
+    # --------------------------------------------------------
+    # DecryptionKeys
+    # --------------------------------------------------------
+
+    lines.append("")
+    lines.append("DecryptionKeys:")
+
+    for depot_id in sorted(dump.depots):
+
+        depot = dump.depots[depot_id]
+
+        if depot.has_key:
+            title = dump.titles.get(
+                depot_id,
+                "Unknown",
+            )
+
+            lines.append(
+                f"  {depot_id}: {title}"
+            )
+
+    return "\n".join(lines)
+
+# ============================================================
+# Entrada
+# ============================================================
+
+def input_section():
+
+    section(1, "Entrada")
+
+    print(
+        f"{BLUE}"
+        "Informe a localização do arquivo .lua"
+        f"{RESET}"
+    )
+
+    print(
+        f"{GRAY}"
+        "(exemplo: /home/user/Downloads/dump.lua)"
+        f"{RESET}"
+    )
+
+    print()
+
+    try:
+
+        raw_path = input(
+            f"{MAGENTA}Arquivo → {RESET}"
+        ).strip()
+
+    except KeyboardInterrupt:
+
+        print("\n")
+        return None
+
+    if not raw_path:
+
+        print(
+            f"\n{RED}"
+            "✗ Nenhum arquivo informado."
+            f"{RESET}"
+        )
+
+        return None
+
+    raw_path = (
+        raw_path
+        .strip('"')
+        .strip("'")
+    )
+
+    path = Path(raw_path).expanduser()
+
+    print()
+
+    if not path.exists():
+
+        print(
+            f"{RED}"
+            "✗ Arquivo não encontrado:"
+            f"{RESET}"
+        )
+
+        print(f"  {path}")
+
+        return None
+
+    if not path.is_file():
+
+        print(
+            f"{RED}"
+            "✗ O caminho informado não é um arquivo."
+            f"{RESET}"
+        )
+
+        return None
+
+    if path.suffix.lower() != ".lua":
+
+        print(
+            f"{YELLOW}"
+            "⚠ Aviso:"
+            f"{RESET} "
+            "o arquivo não possui extensão .lua"
+        )
+
+        print()
+
+    print(
+        f"{CYAN}Arquivo selecionado:{RESET}"
+    )
+
+    print(f"  {path}")
+
+    print()
+
+    return path
+
+# ============================================================
+# Processamento
+# ============================================================
+
+def processing_section(path):
+
+    section(2, "Processando")
+
+    print(
+        f"{GRAY}"
+        f"{path}"
+        f"{RESET}"
+    )
+
+    print()
+
+    progress_bar(
+        "Lendo arquivo   ",
+        steps=20,
+    )
+
+    progress_bar(
+        "Analisando Lua  ",
+        steps=25,
+    )
+
+    dump = parse_lua(path)
+
+    if dump is None:
+        return None
+
+    progress_bar(
+        "Detectando apps ",
+        steps=20,
+    )
+
+    progress_bar(
+        "Detectando depots",
+        steps=25,
+    )
+
+    sleep_animation()
+
+    print()
+
+    print(
+        f"{GREEN}{BOLD}"
+        "✓ Processamento concluído"
+        f"{RESET}"
+    )
+
+    time.sleep(0.5)
+
+    return dump
+
+# ============================================================
+# Seção 3 — Resultado
+# ============================================================
+
+def result_section(dump: Dump):
+
+    clear_terminal()
+
+    banner()
+
+    section(3, "Resultado")
+
+    print(
+        f"{CYAN}{BOLD}"
+        f"Jogo: {dump.title}"
+        f"{RESET}"
+    )
+
+    print()
+
+    print(
+        f"{BOLD}"
+        "Resumo"
+        f"{RESET}"
+    )
+
+    print(
+        f"{GRAY}"
+        "────────────────────────────────────────────────"
+        f"{RESET}"
+    )
+
+    print(
+        f"{GREEN}Apps encontrados:{RESET}   "
+        f"{len(dump.apps)}"
+    )
+
+    print(
+        f"{GREEN}Depots encontrados:{RESET} "
+        f"{len(dump.depots)}"
+    )
+
+    depots_with_key = sum(
+        1
+        for depot in dump.depots.values()
+        if depot.has_key
+    )
+
+    print(
+        f"{GREEN}Depots com key:{RESET}    "
+        f"{depots_with_key}"
+    )
+
+    print()
+
+    print(
+        f"{BOLD}"
+        "Depots detectados"
+        f"{RESET}"
+    )
+
+    print(
+        f"{GRAY}"
+        "────────────────────────────────────────────────"
+        f"{RESET}"
+    )
+
+    if dump.depots:
+
+        for depot_id in sorted(dump.depots):
+
+            depot = dump.depots[depot_id]
+
+            if depot.has_key:
+
+                status = (
+                    f" {GRAY}(key encontrada){RESET}"
+                )
+
+            else:
+
+                status = ""
+
+            print(
+                f"  {CYAN}{depot_id}{RESET}"
+                f" → {dump.title}"
+                f"{status}"
+            )
+
+    else:
+
+        print(
+            f"  {GRAY}Nenhum depot encontrado.{RESET}"
+        )
+
+    print()
+
+# ============================================================
+# YAML
+# ============================================================
+
+def yaml_section(dump: Dump):
+
+    clear_terminal()
+
+    banner()
+
+    print(
+        f"{MAGENTA}{BOLD}"
+        "YAML"
+        f"{RESET}"
+    )
+
+    print(
+        f"{GRAY}"
+        "────────────────────────────────────────────────"
+        f"{RESET}"
+    )
+
+    print()
+
+    spinner(
+        "Gerando YAML",
+        duration=0.5,
+    )
+
+    print()
+
+    yaml_output = generate_yaml(dump)
+
+    print(yaml_output)
+
+    print()
+
+    print(
+        f"{GRAY}"
+        "────────────────────────────────────────────────"
+        f"{RESET}"
+    )
+
+    print()
+
+    print(
+        f"{GREEN}{BOLD}"
+        "✓ YAML gerado com sucesso"
+        f"{RESET}"
+    )
+
+    print()
+
+# ============================================================
+# Principal
+# ============================================================
+
+def main():
+
+    clear_terminal()
+
+    banner()
+
+    path = input_section()
+
+    if path is None:
+        return 1
+
+    sleep_animation()
+
+    dump = processing_section(path)
+
+    if dump is None:
+        return 1
+
+    result_section(dump)
+
+    time.sleep(1.0)
+
+    yaml_section(dump)
+
+    return 0
+
+# ============================================================
+# Entry point
+# ============================================================
+
+if __name__ == "__main__":
+    sys.exit(main())
+
